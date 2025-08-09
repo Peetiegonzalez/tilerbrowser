@@ -1,0 +1,466 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Tiling Sandbox</title>
+  <style>
+    body { margin: 0; font-family: sans-serif; }
+    #root { height: 100vh; }
+  </style>
+  <script src="https://cdn.tailwindcss.com"></script>
+</head>
+<body>
+  <div id="root"></div>
+
+  <script src="https://unpkg.com/react@18/umd/react.development.js" crossorigin></script>
+  <script src="https://unpkg.com/react-dom@18/umd/react-dom.development.js" crossorigin></script>
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+
+  <script type="text/babel">
+    
+/*********************** Utility functions ************************/
+
+function vec(x, y) { return { x, y }; }
+function add(a, b) { return { x: a.x + b.x, y: a.y + b.y }; }
+function sub(a, b) { return { x: a.x - b.x, y: a.y - b.y }; }
+function mul(a, k) { return { x: a.x * k, y: a.y * k }; }
+function dot(a, b) { return a.x * b.x + a.y * b.y; }
+function length(a) { return Math.hypot(a.x, a.y); }
+function normalize(a) { const L = length(a) || 1; return { x: a.x / L, y: a.y / L }; }
+
+function rotatePoint(p, angle) {
+  const c = Math.cos(angle), s = Math.sin(angle);
+  return { x: p.x * c - p.y * s, y: p.x * s + p.y * c };
+}
+
+function polygonWorldPoints(tile) {
+  return tile.points.map(p => {
+    const r = rotatePoint(p, tile.angle);
+    return { x: tile.x + r.x, y: tile.y + r.y };
+  });
+}
+
+function pointDistance(a,b){ return Math.hypot(a.x-b.x,a.y-b.y); }
+
+function isPointInPolygon(point, polygon) {
+  let isInside = false;
+  const len = polygon.length;
+  for (let i = 0, j = len - 1; i < len; j = i++) {
+    const pi = polygon[i];
+    const pj = polygon[j];
+    const intersect = ((pi.y > point.y) !== (pj.y > point.y))
+        && (point.x < (pj.x - pi.x) * (point.y - pi.y) / (pj.y - pi.y) + pi.x);
+    if (intersect) isInside = !isInside;
+  }
+  return isInside;
+}
+
+function pointToSegmentDistance(p, v, w) {
+  const l2 = (v.x - w.x)**2 + (v.y - w.y)**2;
+  if (l2 === 0) return { distance: pointDistance(p, v), point: v };
+  let t = ((p.x - v.x) * (w.x - v.x) + (p.y - v.y) * (w.y - v.y)) / l2;
+  t = Math.max(0, Math.min(1, t));
+  const closestPoint = { x: v.x + t * (w.x - v.x), y: v.y + t * (w.y - v.y) };
+  return { distance: pointDistance(p, closestPoint), point: closestPoint };
+}
+
+/*********************** Tile Definitions ************************/
+const L = 40;
+const phi = (1 + Math.sqrt(5)) / 2;
+const angle72 = 72 * Math.PI / 180;
+const angle36 = 36 * Math.PI / 180;
+
+function makeRegular(n, sidelength=40) {
+  const pts = [];
+  let radius = sidelength / (2 * Math.sin(Math.PI / n));
+  for (let i=0;i<n;i++){
+    const a = (i / n) * Math.PI * 2;
+    pts.push({ x: Math.cos(a) * radius, y: Math.sin(a) * radius });
+  }
+  return pts;
+}
+
+// --- Penrose Kite --- clockwise VERTEX ORDER
+const kite_v1 = { x: L * Math.cos(angle72) + L * phi * Math.cos(angle36), y: 0 };
+const kite_v2 = { x: L * Math.cos(-angle72), y: L * Math.sin(-angle72) };
+const kite_v3 = { x: 0, y: 0 };
+const kite_v4 = { x: L * Math.cos(angle72), y: L * Math.sin(angle72) };
+const uncentered_kite = [ kite_v4, kite_v3, kite_v2, kite_v1 ];
+const kite_centroid_x = (uncentered_kite[0].x + uncentered_kite[1].x + uncentered_kite[3].x) / 4;
+const PenroseP2Kite = uncentered_kite.map(p => ({ x: p.x - kite_centroid_x, y: p.y }));
+
+// --- Penrose Dart --- clockwise VERTEX ORDER
+const dart_v1 = { x: L * Math.cos(angle72) - L * phi * Math.cos(angle36), y: 0 };
+const dart_v2 = { x: L * Math.cos(-angle72), y: L * Math.sin(-angle72) };
+const dart_v3 = { x: 0, y: 0 }; // The reflex angle
+const dart_v4 = { x: L * Math.cos(angle72), y: L * Math.sin(angle72) };
+const uncentered_dart = [ dart_v1, dart_v2, dart_v3, dart_v4 ];
+const dart_centroid_x = (dart_v1.x + dart_v2.x + dart_v4.x) / 4;
+const PenroseP2Dart = uncentered_dart.map(p => ({ x: p.x - dart_centroid_x, y: p.y }));
+
+// --- Penrose Rhombi --- REVERSED VERTEX ORDER
+const PenroseP3Fat = [ { x: 0, y: -L * Math.sin(36 * Math.PI / 180) }, { x: L * Math.cos(36 * Math.PI / 180), y: 0 }, { x: 0, y: L * Math.sin(36 * Math.PI / 180) }, { x: -L * Math.cos(36 * Math.PI / 180), y: 0 } ];
+const PenroseP3Skinny = [ { x: 0, y: -L * Math.sin(72 * Math.PI / 180) }, { x: L * Math.cos(72 * Math.PI / 180), y: 0 }, { x: 0, y: L * Math.sin(72 * Math.PI / 180) }, { x: -L * Math.cos(72 * Math.PI / 180), y: 0 } ];
+
+// --- Generic function to generate tiles from polar notation ---
+function generateFromTurns(sidelength, turns) {
+    let currentAngle = -Math.PI / 2; // Start facing North (0 degrees)
+    let currentPos = { x: 0, y: 0 };
+    const vertices = [currentPos];
+
+    for (const turn of turns) {
+        currentAngle += turn * Math.PI / 180;
+        const nextPos = {
+            x: currentPos.x + sidelength * Math.cos(currentAngle),
+            y: currentPos.y + sidelength * Math.sin(currentAngle)
+        };
+        vertices.push(nextPos);
+        currentPos = nextPos;
+    }
+
+    // Center the polygon
+    const centroid = vertices.reduce((acc, v) => ({ x: acc.x + v.x, y: acc.y + v.y }), { x: 0, y: 0 });
+    centroid.x /= vertices.length;
+    centroid.y /= vertices.length;
+
+    return vertices.map(v => ({ x: v.x - centroid.x, y: v.y - centroid.y }));
+}
+
+// --- Spectre Tile ---
+const spectreTurns = [0, 60, 0, 60, -90, 60, 90, 60, -90, 60, 90, -60, 90, -60];
+const SpectreTile = generateFromTurns(L, spectreTurns);
+
+// --- Imura_1 Tile ---
+const imura1Turns = [0, 72, 72, -108, 72, 72, 108, -72, 108, -72];
+const Imura1Tile = generateFromTurns(L, imura1Turns);
+
+const sampleSets = {
+  "Regular": [ { id: "tri", name: "Triangle", pts: makeRegular(3,40) }, { id: "sq", name: "Square", pts: makeRegular(4,40) }, { id: "hex", name: "Hexagon", pts: makeRegular(6,40) }, ],
+  "Penrose P2": [ { id: "P2kite", name: "P2 Kite", pts: PenroseP2Kite }, { id: "P2dart", name: "P2 Dart", pts: PenroseP2Dart }, ],
+  "Penrose Rhombi": [ { id: "P3fat", name: "P3 Fat", pts: PenroseP3Fat }, { id: "P3skinny", name: "P3 Skinny", pts: PenroseP3Skinny }, ],
+  "Aperiodic": [ { id: "spectre", name: "Spectre", pts: SpectreTile } ],
+  "Compound Tiles": [ { id: "imura1", name: "Imura_1", pts: Imura1Tile } ],
+};
+
+const { useState, useEffect, useRef } = React;
+
+/*********************** Component ************************/
+function TilingSandbox() {
+  const [tiles, setTiles] = useState(() => [
+      { id: 1, type: 'sq', x: 200, y: 180, angle: 0, points: makeRegular(4, 40), color: '#e5e7eb' },
+      { id: 2, type: 'hex', x: 380, y: 220, angle: 0.2, points: makeRegular(6, 40), color: '#d1fae5' }
+  ]);
+  const [nextId, setNextId] = useState(100);
+  const [activeTool, setActiveTool] = useState('select');
+  const [selectedTileId, setSelectedTileId] = useState(null);
+  const [placingType, setPlacingType] = useState('sq');
+  const [snapEnabled, setSnapEnabled] = useState(true);
+  const [palette, setPalette] = useState(['#ef4444', '#f59e0b', '#facc15', '#10b981', '#3b82f6', '#8b5cf6', '#ec4899', '#ffffff']);
+  const [selectedColor, setSelectedColor] = useState(palette[0]);
+  const [draggingTileId, setDraggingTileId] = useState(null); 
+  const [viewBox, setViewBox] = useState({ x: 0, y: 0, width: 1200, height: 800 }); 
+  const [snapTarget, setSnapTarget] = useState(null); // { tileId, edgeIndex }
+
+  const svgRef = useRef(null);
+  const dragState = useRef(null);
+
+  useEffect(() => {
+    window.addEventListener('pointermove', onGlobalPointerMove);
+    window.addEventListener('pointerup', onGlobalPointerUp);
+    return () => {
+      window.removeEventListener('pointermove', onGlobalPointerMove);
+      window.removeEventListener('pointerup', onGlobalPointerUp);
+    };
+  }, [tiles, snapEnabled, viewBox]);
+
+  const handleWheelZoom = (e) => {
+    e.preventDefault();
+    const svg = svgRef.current;
+    if (!svg) return;
+    const zoomFactor = 1.1;
+    const { x, y, width, height } = viewBox;
+    const mousePos = clientToSvg(e);
+    const newWidth = e.deltaY < 0 ? width / zoomFactor : width * zoomFactor;
+    const newHeight = e.deltaY < 0 ? height / zoomFactor : height * zoomFactor;
+    const newX = mousePos.x - (mousePos.x - x) / zoomFactor;
+    const newY = mousePos.y - (mousePos.y - y) / zoomFactor;
+    setViewBox({ x: newX, y: newY, width: newWidth, height: newHeight });
+  };
+  const handleResetView = () => setViewBox({ x: 0, y: 0, width: 1200, height: 800 });
+
+  function clientToSvg(evt) {
+    const svg = svgRef.current;
+    if (!svg) return { x: 0, y: 0 };
+    const pt = svg.createSVGPoint();
+    pt.x = evt.clientX;
+    pt.y = evt.clientY;
+    return pt.matrixTransform(svg.getScreenCTM().inverse());
+  }
+
+  const onGlobalPointerMove = (e) => {
+    if (!dragState.current) return;
+    const state = dragState.current;
+    const pos = clientToSvg(e);
+
+    if (state.type === 'drag') {
+      const dx = pos.x - state.start.x;
+      const dy = pos.y - state.start.y;
+      
+      const movingTile = tiles.find(t => t.id === state.id);
+      if (!movingTile) return;
+
+      let finalPos = { x: state.orig.x + dx, y: state.orig.y + dy };
+      let finalAngle = state.originalAngle;
+      dragState.current.isSnapped = false;
+      setSnapTarget(null);
+
+      if (snapEnabled) {
+        const candidate = { ...movingTile, x: finalPos.x, y: finalPos.y, angle: finalAngle };
+        
+        let targetTile = null;
+        for (let i = tiles.length - 1; i >= 0; i--) {
+          const tile = tiles[i];
+          if (tile.id === candidate.id) continue;
+          if (isPointInPolygon(pos, polygonWorldPoints(tile))) {
+            targetTile = tile;
+            break;
+          }
+        }
+
+        if (targetTile) {
+          const movingPoly = polygonWorldPoints(candidate);
+          const targetPoly = polygonWorldPoints(targetTile);
+          const { primaryEdgeIndex, primaryVertexIndex } = state;
+
+          let bestTargetEdge = { d: Infinity, index: -1, closestPoint: null };
+          for (let i = 0; i < targetPoly.length; i++) {
+            const {distance, point} = pointToSegmentDistance(pos, targetPoly[i], targetPoly[(i + 1) % targetPoly.length]);
+            if (distance < bestTargetEdge.d) {
+              bestTargetEdge = { d: distance, index: i, closestPoint: point };
+            }
+          }
+          
+          if (bestTargetEdge.d < 30) {
+            setSnapTarget({ tileId: targetTile.id, edgeIndex: bestTargetEdge.index });
+
+            const myEdgeStart_world = movingPoly[primaryEdgeIndex];
+            const myEdgeEnd_world = movingPoly[(primaryEdgeIndex + 1) % movingPoly.length];
+            const theirEdgeStart_world = targetPoly[bestTargetEdge.index];
+            const theirEdgeEnd_world = targetPoly[(bestTargetEdge.index + 1) % targetPoly.length];
+            
+            const myEdgeVec = sub(myEdgeEnd_world, myEdgeStart_world);
+            const theirEdgeVec = sub(theirEdgeEnd_world, theirEdgeStart_world);
+            
+            const angleMyEdge = Math.atan2(myEdgeVec.y, myEdgeVec.x);
+            const angleTheirEdge = Math.atan2(theirEdgeVec.y, theirEdgeVec.x);
+            
+            const rotationOffset = Math.PI;
+
+            const proposedAngle = state.originalAngle + (angleTheirEdge - angleMyEdge) + rotationOffset;
+
+            const myPivot_local = movingTile.points[primaryVertexIndex];
+            const myPivot_rotated = rotatePoint(myPivot_local, proposedAngle);
+            const theirPivot_world = pointDistance(myEdgeStart_world, theirEdgeStart_world) < pointDistance(myEdgeStart_world, theirEdgeEnd_world) 
+                ? theirEdgeStart_world 
+                : theirEdgeEnd_world;
+            const pos_vertex_snap = sub(theirPivot_world, myPivot_rotated);
+            
+            const myEdgeStart_local = movingTile.points[primaryEdgeIndex];
+            const myEdgeEnd_local = movingTile.points[(primaryEdgeIndex + 1) % movingTile.points.length];
+            const myMidpoint_local = mul(add(myEdgeStart_local, myEdgeEnd_local), 0.5);
+            const myMidpoint_rotated = rotatePoint(myMidpoint_local, proposedAngle);
+            const theirMidpoint_world = mul(add(theirEdgeStart_world, theirEdgeEnd_world), 0.5);
+            const pos_midpoint_snap = sub(theirMidpoint_world, myMidpoint_rotated);
+
+            const snappedPivotPos = add(pos_vertex_snap, myPivot_rotated);
+            const snappedMidpointPos = add(pos_midpoint_snap, myMidpoint_rotated);
+            
+            if (pointDistance(snappedPivotPos, bestTargetEdge.closestPoint) < pointDistance(snappedMidpointPos, bestTargetEdge.closestPoint)) {
+                finalPos = pos_vertex_snap;
+            } else {
+                finalPos = pos_midpoint_snap;
+            }
+            finalAngle = proposedAngle;
+            dragState.current.isSnapped = true;
+          }
+        }
+      }
+      setTiles(t => t.map(tile => tile.id === state.id ? { ...tile, x: finalPos.x, y: finalPos.y, angle: finalAngle } : tile));
+      dragState.current.last = pos;
+    } else if (state.type === 'pan') {
+      const dx = pos.x - state.start.x;
+      const dy = pos.y - state.start.y;
+      setViewBox({ ...state.origViewBox, x: state.origViewBox.x - dx, y: state.origViewBox.y - dy });
+    } else if (state.type === 'rotate') {
+      const a2 = Math.atan2(pos.y - state.cy, pos.x - state.cx);
+      const a1 = Math.atan2(state.start.y - state.cy, state.start.x - state.cx);
+      setTiles(t => t.map(tile => tile.id === state.id ? { ...tile, angle: state.origAngle + (a2 - a1) } : tile));
+    }
+  };
+
+  const onGlobalPointerUp = (e) => {
+    if (!dragState.current) return;
+    if (dragState.current.type === 'drag') {
+        setDraggingTileId(null);
+        setSnapTarget(null);
+    }
+    try { e.target.releasePointerCapture(e.pointerId); } catch (err) {}
+    dragState.current = null;
+  };
+  
+  function onPointerDownTile(e, tile) {
+    e.stopPropagation();
+    setSelectedTileId(tile.id);
+    if (activeTool === 'color') {
+      setTiles(t => t.map(t_ => t_.id === tile.id ? {...t_, color: selectedColor} : t_));
+      return;
+    }
+    const start = clientToSvg(e);
+    e.target.setPointerCapture(e.pointerId);
+    if (e.shiftKey) {
+      dragState.current = { type: 'rotate', id: tile.id, start, origAngle: tile.angle, cx: tile.x, cy: tile.y };
+    } else {
+      setDraggingTileId(tile.id);
+      const worldPts = polygonWorldPoints(tile);
+      let bestEdge = { d: Infinity, index: -1 };
+      for (let i = 0; i < worldPts.length; i++) {
+        const {distance} = pointToSegmentDistance(start, worldPts[i], worldPts[(i + 1) % worldPts.length]);
+        if (distance < bestEdge.d) { bestEdge = { d: distance, index: i }; }
+      }
+      const p_idx = bestEdge.index;
+      dragState.current = {
+        type: 'drag', id: tile.id, start, orig: { x: tile.x, y: tile.y },
+        originalAngle: tile.angle, isSnapped: false, primaryEdgeIndex: p_idx,
+        primaryVertexIndex: pointDistance(start, worldPts[p_idx]) < pointDistance(start, worldPts[(p_idx + 1) % worldPts.length])
+            ? p_idx : (p_idx + 1) % worldPts.length,
+      };
+    }
+  } 
+
+  function onBoardPointerDown(e) {
+    if (e.button === 1 || e.altKey) {
+      dragState.current = { type: 'pan', start: clientToSvg(e), origViewBox: { ...viewBox } };
+      e.target.setPointerCapture(e.pointerId);
+    } else if (activeTool === 'place') {
+      const pos = clientToSvg(e);
+      const template = Object.values(sampleSets).flat().find(s => s.id === placingType);
+      setTiles(t => [...t, { id: nextId, type: template.id, x:pos.x, y:pos.y, angle:0, points: template.pts, color:'#fff'}]);
+      setNextId(id => id + 1);
+    }
+    setSelectedTileId(null);
+  }
+
+  function polyToPath(points) { return points.map((p, i) => `${i === 0 ? 'M' : 'L'} ${p.x} ${p.y}`).join(' ') + ' Z'; }
+
+  return (
+    <div className="p-4 w-full h-full flex gap-4 bg-gray-100">
+      <div className="w-72 flex-shrink-0 bg-white rounded-lg p-4 shadow-lg overflow-y-auto flex flex-col">
+        <h2 className="text-xl font-bold mb-4 text-gray-800">Tiling Sandbox</h2>
+        <div className="flex flex-col gap-4">
+          <div>
+            <label className="text-sm font-semibold text-gray-600 mb-2 block">Tool</label>
+            <div className="flex gap-2">
+              <button className={`flex-1 px-3 py-2 text-sm rounded-md transition-colors ${activeTool === 'select' ? 'bg-blue-500 text-white shadow' : 'bg-gray-200 hover:bg-gray-300'}`} onClick={() => setActiveTool('select')}>Move</button>
+              <button className={`flex-1 px-3 py-2 text-sm rounded-md transition-colors ${activeTool === 'place' ? 'bg-blue-500 text-white shadow' : 'bg-gray-200 hover:bg-gray-300'}`} onClick={() => setActiveTool('place')}>Add</button>
+              <button className={`flex-1 px-3 py-2 text-sm rounded-md transition-colors ${activeTool === 'color' ? 'bg-blue-500 text-white shadow' : 'bg-gray-200 hover:bg-gray-300'}`} onClick={() => setActiveTool('color')}>Color</button>
+            </div>
+          </div>
+          <div>
+            <label className="text-sm font-semibold text-gray-600 mb-2 block">Tile Sets</label>
+            {Object.entries(sampleSets).map(([group, items]) => (
+              <div key={group} className="mb-3">
+                <div className="font-medium text-gray-700 mb-2">{group}</div>
+                <div className="flex gap-2 flex-wrap">
+                  {items.map(it => <button key={it.id} onClick={() => setPlacingType(it.id)} className={`px-2 py-1 text-xs rounded-md transition-colors ${placingType === it.id && activeTool === 'place' ? 'bg-green-500 text-white font-semibold' : 'bg-gray-100 hover:bg-gray-200'}`}>{it.name}</button>)}
+                </div>
+              </div>
+            ))}
+          </div>
+          <div className="border-t pt-4">
+            <label className="text-sm font-semibold text-gray-600 mb-2 block">Palette</label>
+            <div className="flex gap-2 mb-2 flex-wrap">
+              {palette.map(c => <button key={c} style={{ background: c }} className={`w-7 h-7 rounded-full border-2 ${selectedColor === c ? 'ring-2 ring-offset-2 ring-blue-500 border-white' : 'border-transparent'}`} onClick={() => setSelectedColor(c)} />)}
+            </div>
+            <div className="text-xs text-slate-600">In color mode, click a tile to paint it.</div>
+          </div>
+          <div className="border-t pt-4 flex flex-col gap-2">
+            <div className="flex items-center">
+              <input type="checkbox" id="snapCheck" checked={snapEnabled} onChange={e => setSnapEnabled(e.target.checked)} className="mr-2 h-4 w-4 rounded" />
+              <label htmlFor="snapCheck" className="text-sm font-medium text-gray-700">Snap Edges</label>
+            </div>
+            <button className="w-full px-3 py-2 bg-red-500 text-white rounded-md hover:bg-red-600 transition-colors" onClick={() => setTiles([])}>Clear Board</button>
+            <button className="w-full px-3 py-2 bg-gray-500 text-white rounded-md hover:bg-gray-600 transition-colors" onClick={handleResetView}>Reset View</button>
+          </div>
+        </div>
+        <div className="mt-auto pt-4 border-t">
+          <div className="text-sm font-semibold text-gray-600">Tips</div>
+          <ul className="text-xs list-disc pl-4 mt-2 text-slate-600 space-y-1">
+            <li><b>Pan:</b> Middle-click or Alt+drag background.</li>
+            <li><b>Zoom:</b> Mouse wheel.</li>
+            <li><b>Rotate Tile:</b> <kbd className="border px-1 rounded bg-gray-100">Shift</kbd> + drag tile.</li>
+            <li><b>Snap:</b> Drag tiles near each other.</li>
+            <li><b>Reset View:</b> Double-click background.</li>
+          </ul>
+        </div>
+      </div>
+      <div className="flex-1 bg-gray-50 rounded-lg p-2 shadow-inner relative">
+        <svg ref={svgRef} onPointerDown={onBoardPointerDown} onWheel={handleWheelZoom} onDoubleClick={handleResetView} viewBox={`${viewBox.x} ${viewBox.y} ${viewBox.width} ${viewBox.height}`} className="w-full h-full bg-white border rounded cursor-grab active:cursor-grabbing">
+          <defs>
+            <filter id="shadow" x="-50%" y="-50%" width="200%" height="200%"><feDropShadow dx="0" dy="2" stdDeviation="3" floodOpacity="0.15" /></filter>
+            <pattern id="grid" width="24" height="24" patternUnits="userSpaceOnUse"><path d="M 24 0 L 0 0 0 24" fill="none" stroke="#e5e7eb" strokeWidth="1"/></pattern>
+          </defs>
+          <rect x={viewBox.x} y={viewBox.y} width={viewBox.width} height={viewBox.height} fill="url(#grid)" />
+          <g>
+            {tiles.map(tile => {
+              const isSelected = selectedTileId === tile.id;
+              const isDragging = draggingTileId === tile.id;
+              const isSnapTarget = snapTarget && snapTarget.tileId === tile.id;
+
+              let primaryEdgePath = null;
+              if (isDragging && dragState.current?.primaryEdgeIndex !== undefined) {
+                const { primaryEdgeIndex } = dragState.current;
+                const localPts = tile.points;
+                const v1 = localPts[primaryEdgeIndex];
+                const v2 = localPts[(primaryEdgeIndex + 1) % localPts.length];
+                primaryEdgePath = `M ${v1.x} ${v1.y} L ${v2.x} ${v2.y}`;
+              }
+
+              let targetEdgePath = null;
+              if (isSnapTarget) {
+                  const { edgeIndex } = snapTarget;
+                  const localPts = tile.points;
+                  const v1 = localPts[edgeIndex];
+                  const v2 = localPts[(edgeIndex + 1) % localPts.length];
+                  targetEdgePath = `M ${v1.x} ${v1.y} L ${v2.x} ${v2.y}`;
+              }
+
+              return (
+                <g key={tile.id} transform={`translate(${tile.x} ${tile.y}) rotate(${tile.angle * 180 / Math.PI})`}>
+                  <path 
+                    d={polyToPath(tile.points)} 
+                    fill={isSnapTarget ? '#bae6fd' : (tile.color || '#fff')} 
+                    stroke="#1f2937" 
+                    strokeWidth={1.5 / (viewBox.width / 1200)} 
+                    filter={isSelected ? 'url(#shadow)' : undefined} 
+                    onPointerDown={(e) => onPointerDownTile(e, tile)} 
+                    style={{ cursor: activeTool === 'color' ? 'crosshair' : 'grab' }} 
+                  />
+                  {primaryEdgePath && <g className="pointer-events-none"><path d={primaryEdgePath} stroke="#3b82f6" strokeWidth={5 / (viewBox.width / 1200)} strokeOpacity="0.7" strokeLinecap="round" /></g>}
+                  {targetEdgePath && <g className="pointer-events-none"><path d={targetEdgePath} stroke="#f97316" strokeWidth={5 / (viewBox.width / 1200)} strokeOpacity="0.7" strokeLinecap="round" /></g>}
+                </g>
+              );
+            })}
+          </g>
+        </svg>
+      </div>
+    </div>
+  );
+}
+
+const root = ReactDOM.createRoot(document.getElementById('root'));
+root.render(<TilingSandbox />);
+
+  </script>
+</body>
+</html>
